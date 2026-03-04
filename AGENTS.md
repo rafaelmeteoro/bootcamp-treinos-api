@@ -53,6 +53,6 @@ Swagger JSON em `/swagger.json`, Scalar UI em `/docs`. Endpoints de auth são me
 
 - **TypeScript strict** com target ES2024 e module resolution `nodenext`
 - **ESLint** com typescript-eslint, integração com prettier e `simple-import-sort` (imports devem ser ordenados)
-- **Zod 4** para validação (usa padrao `z.interface()`, não `z.object()`)
+- **Zod 4** para validação (usa padrao `z.object()`, não `z.interface()`)
 - **CORS** permite `http://localhost:3000` com credentials
 - Variáveis de ambiente: `PORT`, `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`
