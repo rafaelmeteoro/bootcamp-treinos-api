@@ -1,20 +1,19 @@
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 
-import { NotFoundError } from "../erros/index.js";
 import { WeekDay } from "../generated/prisma/enums.js";
 import { prisma } from "../lib/db.js";
 
 dayjs.extend(utc);
 
-const DAY_INDEX_TO_WEEK_DAY: Record<number, WeekDay> = {
-  0: WeekDay.SUNDAY,
-  1: WeekDay.MONDAY,
-  2: WeekDay.TUESDAY,
-  3: WeekDay.WEDNESDAY,
-  4: WeekDay.THURSDAY,
-  5: WeekDay.FRIDAY,
-  6: WeekDay.SATURDAY,
+const WEEKDAY_MAP: Record<number, string> = {
+  0: "SUNDAY",
+  1: "MONDAY",
+  2: "TUESDAY",
+  3: "WEDNESDAY",
+  4: "THURSDAY",
+  5: "FRIDAY",
+  6: "SATURDAY",
 };
 
 interface InputDto {
@@ -23,144 +22,168 @@ interface InputDto {
 }
 
 interface OutputDto {
-  activeWorkoutPlanId: string;
-  todayWorkoutDay: {
+  activeWorkoutPlanId?: string;
+  todayWorkoutDay?: {
     workoutPlanId: string;
     id: string;
     name: string;
     isRest: boolean;
-    weekDay: string;
+    weekDay: WeekDay;
     estimatedDurationInSeconds: number;
     coverImageUrl?: string;
     exercisesCount: number;
-  } | null;
+  };
   workoutStreak: number;
   consistencyByDay: Record<
     string,
-    { workoutDayCompleted: boolean; workoutDayStarted: boolean }
+    {
+      workoutDayCompleted: boolean;
+      workoutDayStarted: boolean;
+    }
   >;
 }
 
 export class GetHomeData {
   async execute(dto: InputDto): Promise<OutputDto> {
-    const parsedDate = dayjs.utc(dto.date);
+    const currentDate = dayjs.utc(dto.date);
 
     const workoutPlan = await prisma.workoutPlan.findFirst({
       where: { userId: dto.userId, isActive: true },
       include: {
         workoutDays: {
           include: {
-            _count: { select: { exercises: true } },
+            exercises: true,
+            sessions: true,
           },
         },
       },
     });
 
-    if (!workoutPlan) {
-      throw new NotFoundError("No active workout plan found");
-    }
-
-    const workoutDayIds = workoutPlan.workoutDays.map((d) => d.id);
-
-    // Today's workout day
-    const todayWeekDay = DAY_INDEX_TO_WEEK_DAY[parsedDate.day()];
-    const todayWorkoutDayData = workoutPlan.workoutDays.find(
-      (d) => d.weekDay === todayWeekDay,
+    const todayWeekDay = WEEKDAY_MAP[currentDate.day()];
+    const todayWorkoutDay = workoutPlan?.workoutDays.find(
+      (day) => day.weekDay === todayWeekDay,
     );
 
-    // Week range: Sunday 00:00:00 UTC → Saturday 23:59:59 UTC
-    const startOfWeek = parsedDate.startOf("week");
-    const endOfWeek = parsedDate.endOf("week");
+    const weekStart = currentDate.day(0).startOf("day");
+    const weekEnd = currentDate.day(6).endOf("day");
 
-    // Sessions within the week for consistencyByDay
     const weekSessions = await prisma.workoutSession.findMany({
       where: {
-        workoutDayId: { in: workoutDayIds },
-        startedAt: { gte: startOfWeek.toDate(), lte: endOfWeek.toDate() },
+        workoutDay: {
+          workoutPlanId: workoutPlan?.id,
+        },
+        startedAt: {
+          gte: weekStart.toDate(),
+          lte: weekEnd.toDate(),
+        },
       },
-      select: { startedAt: true, completedAt: true },
     });
 
-    // Build consistencyByDay — all 7 days initialised to false
     const consistencyByDay: Record<
       string,
       { workoutDayCompleted: boolean; workoutDayStarted: boolean }
     > = {};
 
     for (let i = 0; i < 7; i++) {
-      const key = startOfWeek.add(i, "day").format("YYYY-MM-DD");
-      consistencyByDay[key] = {
-        workoutDayCompleted: false,
-        workoutDayStarted: false,
-      };
-    }
+      const day = weekStart.add(i, "day");
+      const dateKey = day.format("YYYY-MM-DD");
 
-    for (const session of weekSessions) {
-      const key = dayjs.utc(session.startedAt).format("YYYY-MM-DD");
-      if (consistencyByDay[key]) {
-        consistencyByDay[key].workoutDayStarted = true;
-        if (session.completedAt) {
-          consistencyByDay[key].workoutDayCompleted = true;
-        }
-      }
-    }
-
-    // Completed sessions for streak (last 365 days)
-    const completedSessions = await prisma.workoutSession.findMany({
-      where: {
-        workoutDayId: { in: workoutDayIds },
-        completedAt: { not: null },
-        startedAt: { gte: parsedDate.subtract(365, "day").toDate() },
-      },
-      select: { workoutDayId: true, startedAt: true },
-    });
-
-    const completedKeys = new Set(
-      completedSessions.map(
-        (s) =>
-          `${s.workoutDayId}:${dayjs.utc(s.startedAt).format("YYYY-MM-DD")}`,
-      ),
-    );
-
-    const workoutDayByWeekDay = new Map(
-      workoutPlan.workoutDays.map((d) => [d.weekDay, d]),
-    );
-
-    let workoutStreak = 0;
-    for (let i = 0; i < 365; i++) {
-      const checkDate = parsedDate.subtract(i, "day");
-      const planDay = workoutDayByWeekDay.get(
-        DAY_INDEX_TO_WEEK_DAY[checkDate.day()],
+      const daySessions = weekSessions.filter(
+        (s) => dayjs.utc(s.startedAt).format("YYYY-MM-DD") === dateKey,
       );
 
-      if (!planDay) continue;
+      const workoutDayStarted = daySessions.length > 0;
+      const workoutDayCompleted = daySessions.some(
+        (s) => s.completedAt !== null,
+      );
 
-      if (
-        completedKeys.has(`${planDay.id}:${checkDate.format("YYYY-MM-DD")}`)
-      ) {
-        workoutStreak++;
-      } else {
-        break;
-      }
+      consistencyByDay[dateKey] = { workoutDayCompleted, workoutDayStarted };
+    }
+
+    let workoutStreak = 0;
+
+    if (workoutPlan) {
+      workoutStreak = await this.calculateStreak(
+        workoutPlan.id,
+        workoutPlan.workoutDays,
+        currentDate,
+      );
     }
 
     return {
-      activeWorkoutPlanId: workoutPlan.id,
-      todayWorkoutDay: todayWorkoutDayData
-        ? {
-            workoutPlanId: workoutPlan.id,
-            id: todayWorkoutDayData.id,
-            name: todayWorkoutDayData.name,
-            isRest: todayWorkoutDayData.isRest,
-            weekDay: todayWorkoutDayData.weekDay,
-            estimatedDurationInSeconds:
-              todayWorkoutDayData.estimatedDurationInSeconds,
-            coverImageUrl: todayWorkoutDayData.coverImageUrl ?? undefined,
-            exercisesCount: todayWorkoutDayData._count.exercises,
-          }
-        : null,
+      activeWorkoutPlanId: workoutPlan?.id,
+      todayWorkoutDay:
+        todayWorkoutDay && workoutPlan
+          ? {
+              workoutPlanId: workoutPlan.id,
+              id: todayWorkoutDay.id,
+              name: todayWorkoutDay.name,
+              isRest: todayWorkoutDay.isRest,
+              weekDay: todayWorkoutDay.weekDay,
+              estimatedDurationInSeconds:
+                todayWorkoutDay.estimatedDurationInSeconds,
+              coverImageUrl: todayWorkoutDay.coverImageUrl ?? undefined,
+              exercisesCount: todayWorkoutDay.exercises.length,
+            }
+          : undefined,
       workoutStreak,
       consistencyByDay,
     };
+  }
+
+  private async calculateStreak(
+    workoutPlanId: string,
+    workoutDays: Array<{
+      weekDay: string;
+      isRest: boolean;
+      sessions: Array<{ startedAt: Date; completedAt: Date | null }>;
+    }>,
+    currentDate: dayjs.Dayjs,
+  ): Promise<number> {
+    const planWeekDays = new Set(workoutDays.map((d) => d.weekDay));
+    const restWeekDays = new Set(
+      workoutDays.filter((d) => d.isRest).map((d) => d.weekDay),
+    );
+
+    const allSessions = await prisma.workoutSession.findMany({
+      where: {
+        workoutDay: { workoutPlanId },
+        completedAt: { not: null },
+      },
+      select: { startedAt: true },
+    });
+
+    const completedDates = new Set(
+      allSessions.map((s) => dayjs.utc(s.startedAt).format("YYYY-MM-DD")),
+    );
+
+    let streak = 0;
+    let day = currentDate;
+
+    for (let i = 0; i < 365; i++) {
+      const weekDay = WEEKDAY_MAP[day.day()];
+
+      if (!planWeekDays.has(weekDay)) {
+        day = day.subtract(1, "day");
+        continue;
+      }
+
+      if (restWeekDays.has(weekDay)) {
+        streak++;
+        day = day.subtract(1, "day");
+        continue;
+      }
+
+      const dateKey = day.format("YYYY-MM-DD");
+      if (completedDates.has(dateKey)) {
+        streak++;
+        day = day.subtract(1, "day");
+        continue;
+      }
+
+      break;
+    }
+
+    return streak;
   }
 }
